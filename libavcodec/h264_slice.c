@@ -1551,7 +1551,15 @@ static int h264_field_start(H264Context *h, const H264SliceContext *sl,
                 -1
             };
 
-            if (prev &&
+            /* Only conceal from a picture that is certain to be reported.
+             * ::reference collects the field bits as each field is marked, so
+             * anything short of a whole frame is either a field pair whose
+             * second field never arrived or a picture that is no reference at
+             * all -- and the end of decode_nal_units() reports neither. Corrupt
+             * input reaches both, and awaiting one waits for a field that will
+             * never be decoded. Fall through to the colour fill instead.
+             * Masked, as ::reference also carries DELAYED_PIC_REF. */
+            if (prev && (prev->reference & PICT_FRAME) == PICT_FRAME &&
                 h->short_ref[0]->f->width == prev->f->width &&
                 h->short_ref[0]->f->height == prev->f->height &&
                 h->short_ref[0]->f->format == prev->f->format) {
