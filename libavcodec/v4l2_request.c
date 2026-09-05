@@ -160,6 +160,18 @@ static int v4l2_request_queue_capture_buffer(V4L2RequestContext *ctx,
         .type = ctx->fctxi->capture.format.type,
         .memory = V4L2_MEMORY_MMAP,
     };
+
+#ifdef V4L2_BUF_FLAG_NO_CACHE_CLEAN
+    /*
+     * CAPTURE buffers are only ever written by the decoder and read by the
+     * CPU, so there is nothing to clean from the caches before the hardware
+     * writes them; skipping the clean halves the cache maintenance that
+     * videobuf2 does for non-coherent (cacheable) buffers. The invalidate
+     * at DQBUF is still done.
+     */
+    if (ctx->fctxi->capture.capabilities & V4L2_BUF_CAP_SUPPORTS_MMAP_CACHE_HINTS)
+        buffer.flags = V4L2_BUF_FLAG_NO_CACHE_CLEAN;
+#endif
     return v4l2_request_queue_buffer(ctx, &buffer);
 }
 
