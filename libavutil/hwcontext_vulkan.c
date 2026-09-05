@@ -3280,6 +3280,100 @@ static inline VkFormat drm_to_vulkan_fmt(uint32_t drm_fourcc)
     return VK_FORMAT_UNDEFINED;
 }
 
+/*
+ * Multi-plane DRM formats that a single-layer descriptor may carry (e.g. what
+ * the v4l2request and rkmpp hwcontexts export), and the single-plane format of
+ * each of their planes. The importer creates one VkImage per layer, so such a
+ * layer is expanded into one layer per plane before mapping, which is exactly
+ * the descriptor shape that VAAPI's separate-layers export produces.
+ */
+static const struct {
+    uint32_t drm_fourcc;
+    int      nb_planes;
+    uint32_t plane_fourcc[AV_DRM_MAX_PLANES];
+} vulkan_drm_multiplane_map[] = {
+    { DRM_FORMAT_NV12,   2, { DRM_FORMAT_R8,  DRM_FORMAT_GR88   } },
+    { DRM_FORMAT_NV16,   2, { DRM_FORMAT_R8,  DRM_FORMAT_GR88   } },
+    { DRM_FORMAT_NV24,   2, { DRM_FORMAT_R8,  DRM_FORMAT_GR88   } },
+    { DRM_FORMAT_P010,   2, { DRM_FORMAT_R16, DRM_FORMAT_GR1616 } },
+#ifdef DRM_FORMAT_P012
+    { DRM_FORMAT_P012,   2, { DRM_FORMAT_R16, DRM_FORMAT_GR1616 } },
+#endif
+#ifdef DRM_FORMAT_P016
+    { DRM_FORMAT_P016,   2, { DRM_FORMAT_R16, DRM_FORMAT_GR1616 } },
+#endif
+    { DRM_FORMAT_YUV420, 3, { DRM_FORMAT_R8,  DRM_FORMAT_R8, DRM_FORMAT_R8 } },
+    { DRM_FORMAT_YUV422, 3, { DRM_FORMAT_R8,  DRM_FORMAT_R8, DRM_FORMAT_R8 } },
+    { DRM_FORMAT_YUV444, 3, { DRM_FORMAT_R8,  DRM_FORMAT_R8, DRM_FORMAT_R8 } },
+};
+
+/*
+ * Rewrite a descriptor whose layers carry a multi-plane format (one layer with
+ * nb_planes > 1) into one single-plane layer per plane. Only done for linear
+ * buffers, where each plane is an independent 2D image and the per-plane
+ * fourcc describes it exactly; tiled modifiers are left to the caller.
+ * Returns 1 if the descriptor was rewritten into *out, 0 if untouched, <0 on error.
+ */
+static int vulkan_drm_expand_multiplane(AVHWDeviceContext *ctx,
+                                        const AVDRMFrameDescriptor *in,
+                                        AVDRMFrameDescriptor *out)
+{
+    int nb_layers = 0;
+
+    for (int i = 0; i < in->nb_layers; i++)
+        if (in->layers[i].nb_planes > 1)
+            goto expand;
+
+    return 0;
+
+expand:
+    *out = *in;
+    out->nb_layers = 0;
+
+    for (int i = 0; i < in->nb_layers; i++) {
+        const AVDRMLayerDescriptor *layer = &in->layers[i];
+        int found = -1;
+
+        if (layer->nb_planes == 1) {
+            if (nb_layers >= AV_DRM_MAX_PLANES)
+                return AVERROR(EINVAL);
+            out->layers[nb_layers++] = *layer;
+            continue;
+        }
+
+        for (int j = 0; j < FF_ARRAY_ELEMS(vulkan_drm_multiplane_map); j++) {
+            if (vulkan_drm_multiplane_map[j].drm_fourcc == layer->format &&
+                vulkan_drm_multiplane_map[j].nb_planes == layer->nb_planes) {
+                found = j;
+                break;
+            }
+        }
+        if (found < 0)
+            return 0; /* not a format we know how to split, let the caller report it */
+
+        for (int p = 0; p < layer->nb_planes; p++) {
+            const AVDRMObjectDescriptor *obj = &in->objects[layer->planes[p].object_index];
+            AVDRMLayerDescriptor *nl;
+
+            if (obj->format_modifier != DRM_FORMAT_MOD_LINEAR)
+                return 0;
+            if (nb_layers >= AV_DRM_MAX_PLANES)
+                return AVERROR(EINVAL);
+
+            nl = &out->layers[nb_layers++];
+            nl->format    = vulkan_drm_multiplane_map[found].plane_fourcc[p];
+            nl->nb_planes = 1;
+            nl->planes[0] = layer->planes[p];
+        }
+    }
+
+    out->nb_layers = nb_layers;
+    av_log(ctx, AV_LOG_DEBUG, "Expanded multi-plane DRM layer(s) into %d "
+           "single-plane layers for Vulkan import\n", nb_layers);
+
+    return 1;
+}
+
 static int vulkan_map_from_drm_frame_desc(AVHWFramesContext *hwfc, AVVkFrame **frame,
                                           const AVFrame *src, int flags)
 {
@@ -3292,8 +3386,18 @@ static int vulkan_map_from_drm_frame_desc(AVHWFramesContext *hwfc, AVVkFrame **f
     AVVulkanDeviceContext *hwctx = &p->p;
     FFVulkanFunctions *vk = &p->vkctx.vkfn;
     const AVDRMFrameDescriptor *desc = (AVDRMFrameDescriptor *)src->data[0];
+    AVDRMFrameDescriptor expanded_desc;
     VkBindImageMemoryInfo bind_info[AV_DRM_MAX_PLANES];
     VkBindImagePlaneMemoryInfo plane_info[AV_DRM_MAX_PLANES];
+
+    /* One VkImage is created per layer: split linear multi-plane layers
+     * (NV12, P010, ...) into one layer per plane first. */
+    err = vulkan_drm_expand_multiplane(ctx, desc, &expanded_desc);
+    if (err < 0)
+        return err;
+    if (err > 0)
+        desc = &expanded_desc;
+    err = 0;
 
     for (int i = 0; i < desc->nb_layers; i++) {
         if (drm_to_vulkan_fmt(desc->layers[i].format) == VK_FORMAT_UNDEFINED) {
