@@ -67,6 +67,7 @@ typedef struct H264ParseContext {
     int parse_last_mb;
     int64_t reference_dts;
     int last_frame_num, last_picture_structure;
+    int mvc;    ///< dependent view NAL units seen, see h264_find_frame_end()
 } H264ParseContext;
 
 static int find_start_code(const uint8_t *buf, int buf_size,
@@ -123,8 +124,16 @@ static int h264_find_frame_end(H264ParseContext *p, const uint8_t *buf,
                 state >>= 1;           // 2->1, 1->0, 0->0
         } else if (state <= 5) {
             int nalu_type = buf[i] & 0x1F;
-            if (nalu_type == H264_NAL_SEI || nalu_type == H264_NAL_SPS ||
-                nalu_type == H264_NAL_PPS || nalu_type == H264_NAL_AUD) {
+            /* In an MVC stream the dependent view components follow the base view
+             * slices within the same access unit, and bring their own PPS and SEI
+             * NAL units along (plus a subset SPS, and on Blu-ray/AVCHD a type 24
+             * delimiter). Once such NAL units have been seen, only an AUD, an SPS
+             * or a new base view picture ends the access unit. */
+            if (nalu_type == H264_NAL_SUB_SPS || nalu_type == H264_NAL_EXTEN_SLICE ||
+                nalu_type == H264_NAL_UNSPECIFIED24)
+                p->mvc = 1;
+            if (nalu_type == H264_NAL_SPS || nalu_type == H264_NAL_AUD ||
+                (!p->mvc && (nalu_type == H264_NAL_SEI || nalu_type == H264_NAL_PPS))) {
                 if (pc->frame_start_found) {
                     i++;
                     goto found;
