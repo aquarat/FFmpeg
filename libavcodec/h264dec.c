@@ -1096,6 +1096,21 @@ static int finalize_frame(H264Context *h, H264Picture *out)
     return 0;
 }
 
+/* Whether pic is the first field of a complementary pair whose second field has
+ * not been started yet, in whichever view it belongs to. */
+static int dep_mid_field_pair(const H264Context *h, const H264Picture *pic)
+{
+    for (unsigned v = 1; v < h->nb_views; v++) {
+        if (v == h->cur_view) {
+            if (h->cur_pic_ptr == pic && FIELD_PICTURE(h) && h->first_field)
+                return 1;
+        } else if (h->views[v].pending_field_pic == pic && h->views[v].first_field) {
+            return 1;
+        }
+    }
+    return 0;
+}
+
 /**
  * Resolve the dependent view pictures paired with a base view picture that has
  * left the reorder buffer.
@@ -1116,6 +1131,15 @@ int ff_h264_resolve_view_pair(H264Context *h, H264Picture *base, int output,
 
         if (!dep->f->buf[0] || dep->base_view_pic < 0 ||
             &h->DPB[dep->base_view_pic] != base)
+            continue;
+
+        /* In a field coded access unit the base view's second field is decoded
+         * before the dependent view's, so a non-reference base view picture can
+         * leave the reorder buffer while its partner holds only a first field.
+         * Keep the link: the partner's second field comes back here once it has
+         * started, and emitting it now would output it twice, the first time
+         * half decoded. */
+        if (dep_mid_field_pair(h, dep))
             continue;
 
         dep->base_view_pic = -1;
