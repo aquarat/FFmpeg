@@ -428,6 +428,13 @@ int ff_h264_update_thread_context(AVCodecContext *dst,
 
     h->width_from_caller    = h1->width_from_caller;
     h->height_from_caller   = h1->height_from_caller;
+
+    /* Dependent view pictures are started once setup has finished, where
+     * init_dimensions() is not run, so they rely on the inherited cropping. */
+    h->crop_left            = h1->crop_left;
+    h->crop_right           = h1->crop_right;
+    h->crop_top             = h1->crop_top;
+    h->crop_bottom          = h1->crop_bottom;
     h->first_field          = h1->first_field;
     h->picture_structure    = h1->picture_structure;
     h->mb_aff_frame         = h1->mb_aff_frame;
